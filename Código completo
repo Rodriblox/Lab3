@@ -1,0 +1,142 @@
+#include <Arduino.h>
+#include <driver/timer.h>
+#include <driver/touch_pad.h>
+
+// Pines
+const int ledTimer[4] = {23, 22, 21, 19};    // LEDs para contador automático (timer)
+const int ledBotones[4] = {12, 13, 14, 15};  // LEDs para contador manual (botones)
+const int botonSuma = 17;                    // B1
+const int botonResta = 16;                   // B2
+const int pinAlarma = 18;                    // LED de alarma
+const int touchPin = 4;                      // Cable suelto como sensor (GPIO4 = T0)
+
+// Variables globales
+volatile int contadorBotones = 0;
+volatile bool flagIncremento = false;
+volatile bool flagDecremento = false;
+
+volatile int contadorTimer = 0;
+volatile bool flagTimer = false;
+volatile bool flagTouch = false;
+
+unsigned long intervaloTimer = 250; // ms
+hw_timer_t* timer = NULL;
+
+// Antirrebote
+const unsigned long debounceDelay = 120;
+
+// --- ISR para botones ---
+void IRAM_ATTR isrSuma() {
+  flagIncremento = true;
+}
+void IRAM_ATTR isrResta() {
+  flagDecremento = true;
+}
+
+// --- ISR para timer ---
+void IRAM_ATTR onTimer() {
+  flagTimer = true;
+}
+
+// --- ISR para touch ---
+void IRAM_ATTR isrTouch() {
+  flagTouch = true;
+}
+
+// Mostrar número en LEDs
+void mostrarNumero(int numero, const int* leds) {
+  for (int i = 0; i < 4; i++) {
+    digitalWrite(leds[i], (numero >> i) & 1);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  // LEDs
+  for (int i = 0; i < 4; i++) {
+    pinMode(ledTimer[i], OUTPUT);
+    digitalWrite(ledTimer[i], LOW);
+    pinMode(ledBotones[i], OUTPUT);
+    digitalWrite(ledBotones[i], LOW);
+  }
+  pinMode(pinAlarma, OUTPUT);
+  digitalWrite(pinAlarma, LOW);
+
+  // Botones con interrupciones
+  pinMode(botonSuma, INPUT_PULLUP);
+  pinMode(botonResta, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(botonSuma), isrSuma, FALLING);
+  attachInterrupt(digitalPinToInterrupt(botonResta), isrResta, FALLING);
+
+  // Timer hardware (usando timer 0, grupo 0)
+  timer = timerBegin(0, 80, true); // 80 prescaler: 1us tick
+  timerAttachInterrupt(timer, &onTimer, true);
+  timerAlarmWrite(timer, intervaloTimer * 1000, true); // 250ms
+  timerAlarmEnable(timer);
+
+  // Sensor capacitivo (cable suelto en GPIO4)
+  touchAttachInterrupt(touchPin, isrTouch, 40); // Ajusta el umbral según tu ambiente
+
+  mostrarNumero(contadorBotones, ledBotones);
+  mostrarNumero(contadorTimer, ledTimer);
+}
+
+void loop() {
+  // --- Botones con interrupciones y antirrebote en el loop ---
+  static unsigned long lastPressSuma = 0;
+  static unsigned long lastPressResta = 0;
+
+  if (flagIncremento) {
+    flagIncremento = false;
+    if (millis() - lastPressSuma > debounceDelay) {
+      contadorBotones = (contadorBotones + 1) % 16;
+      mostrarNumero(contadorBotones, ledBotones);
+      Serial.print("Contador botones: ");
+      Serial.println(contadorBotones);
+      lastPressSuma = millis();
+    }
+  }
+  if (flagDecremento) {
+    flagDecremento = false;
+    if (millis() - lastPressResta > debounceDelay) {
+      contadorBotones = (contadorBotones - 1 + 16) % 16;
+      mostrarNumero(contadorBotones, ledBotones);
+      Serial.print("Contador botones: ");
+      Serial.println(contadorBotones);
+      lastPressResta = millis();
+    }
+  }
+
+  // --- Timer automático ---
+  if (flagTimer) {
+    flagTimer = false;
+    contadorTimer = (contadorTimer + 1) % 16;
+    mostrarNumero(contadorTimer, ledTimer);
+    Serial.print("Contador timer: ");
+    Serial.println(contadorTimer);
+  }
+
+  // --- Alarma: LED cambia de estado solo en coincidencia, permanece hasta la siguiente coincidencia ---
+  static bool estadoAlarma = false;
+  static bool coincidenciaAnterior = false;
+  bool coincidenciaActual = (contadorTimer == contadorBotones);
+
+  if (coincidenciaActual && !coincidenciaAnterior) {
+    // Flanco de coincidencia: cambiar estado de la alarma
+    estadoAlarma = !estadoAlarma;
+    digitalWrite(pinAlarma, estadoAlarma ? HIGH : LOW);
+    Serial.println("¡Coincidencia! Alarma cambiada.");
+  }
+  coincidenciaAnterior = coincidenciaActual;
+
+  // --- Cable suelto (touch) para reiniciar SOLO el contador automático ---
+  if (flagTouch) {
+    flagTouch = false;
+    contadorTimer = 0;
+    mostrarNumero(contadorTimer, ledTimer);
+    Serial.println("Timer reiniciado por cable suelto (touch).");
+    delay(100); // Antirrebote simple para el touch
+  }
+}
